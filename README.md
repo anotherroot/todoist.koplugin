@@ -6,7 +6,7 @@ from. Everything is saved on the device first, so nothing is lost when there is
 no Wi-Fi: it is sent later, on its own, and the plugin tells you if it keeps
 failing.
 
-Status: experimental. Tested on a Kobo with KOReader v2026.03.
+Status: experimental. Developed for KOReader v2026.03 (Kobo).
 
 ## What you can do
 

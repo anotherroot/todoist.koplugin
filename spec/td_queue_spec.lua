@@ -489,4 +489,71 @@ describe("td_queue", function()
         env.requests[2].on_done({ ok = false, kind = "temporary", message = "No connection." })
         assert.equal(1, #env.alerts) -- 2 unsent were already shown
     end)
+
+    it("an error while preparing the request fails the item permanently and frees the queue", function()
+        local deps = deps_for(store)
+        local broken = true
+        deps.with_book = function()
+            if broken then error("x") end
+            return false
+        end
+        local q = td_queue.new(deps)
+        local a = add("a")
+        q:submit(a.id)
+        assert.equal(0, #env.requests)
+        local now = store:get(a.id)
+        assert.equal("failed", now.status)
+        assert.equal("permanent", now.error_kind)
+        assert.equal("Couldn't prepare the task.", now.last_error)
+        assert.equal(1, #env.alerts)
+        assert.equal("permanent", env.alerts[1].kind)
+        assert.same({}, env.timers) -- no watchdog left behind
+        broken = false
+        local b = add("b")
+        q:submit(b.id)
+        assert.equal(1, #env.requests)
+        assert.equal(b.id, body_uuid(env.requests[1].req))
+    end)
+
+    it("a scheduler that raises on the watchdog doesn't jam the queue", function()
+        local deps = deps_for(store)
+        local real_schedule = deps.schedule
+        local fail_once = true
+        deps.schedule = function(seconds, fn)
+            if fail_once then
+                fail_once = false
+                error("no timers")
+            end
+            return real_schedule(seconds, fn)
+        end
+        local q = td_queue.new(deps)
+        local a = add("a")
+        q:submit(a.id)
+        assert.equal("failed", store:get(a.id).status)
+        assert.equal("permanent", store:get(a.id).error_kind)
+        assert.equal(0, #env.requests)
+        local b = add("b")
+        q:submit(b.id)
+        assert.equal(1, #env.requests)
+        assert.equal(b.id, body_uuid(env.requests[1].req))
+        answer_ok(1)
+        assert.equal("sent", store:get(b.id).status)
+    end)
+
+    it("a notify that raises doesn't stop the next item", function()
+        local deps = deps_for(store)
+        deps.notify = function() error("toast broke") end
+        local q = td_queue.new(deps)
+        local a = add("a")
+        env.clock = 1001
+        local b = add("b")
+        q:submit(a.id)
+        assert.equal(1, #env.requests)
+        answer_ok(1)
+        assert.equal("sent", store:get(a.id).status)
+        assert.equal(2, #env.requests)
+        assert.equal(b.id, body_uuid(env.requests[2].req))
+        answer_ok(2)
+        assert.equal("sent", store:get(b.id).status)
+    end)
 end)

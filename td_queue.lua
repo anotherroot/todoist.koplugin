@@ -26,6 +26,26 @@ M.BACKOFF = { 60, 120, 300, 900, 1800 } -- seconds; the last one repeats forever
 M.WATCHDOG = 60 -- seconds without an answer before a request counts as lost
 M.ALERT_AFTER = 3 -- temporary failures in a row before the owner is alerted
 M.NO_KEY = "No Todoist API key. Add it in Settings."
+M.CANT_PREPARE = "Couldn't prepare the task."
+
+-- KOReader's logger when there is one (not in tests). Never pass the token.
+local function warn(...)
+    local ok, logger = pcall(require, "logger")
+    if ok and type(logger) == "table" and logger.warn then pcall(logger.warn, ...) end
+end
+
+local function redact(s, secret)
+    if type(secret) ~= "string" or secret == "" then return s end
+    local out, i = {}, 1
+    while true do
+        local a, b = s:find(secret, i, true)
+        if not a then break end
+        out[#out + 1] = s:sub(i, a - 1) .. "***"
+        i = b + 1
+    end
+    out[#out + 1] = s:sub(i)
+    return table.concat(out)
+end
 
 local function no_connection()
     return { ok = false, kind = "temporary", message = "No connection." }
@@ -105,19 +125,20 @@ function Queue:_maybe_alert(always)
     if not info then return false end
     if not always and info.count <= self.alerted then return false end
     self.alerted = info.count
-    self.deps.alert(info)
+    local ok, err = pcall(self.deps.alert, info)
+    if not ok then warn("Todoist: alert failed:", tostring(err)) end
     return true
 end
 
 function Queue:submit(item_id)
     if not self.store:get(item_id) then return end
     if not self.deps.online() then
-        self.deps.notify("Saved, will send when Wi-Fi is on")
+        self:_notify("Saved, will send when Wi-Fi is on")
         return
     end
     if self.auth_blocked then
         if not self:_maybe_alert() then
-            self.deps.notify("Saved, not sent: check the API key in Settings")
+            self:_notify("Saved, not sent: check the API key in Settings")
         end
         return
     end
@@ -153,27 +174,49 @@ function Queue:_start(item)
         last_attempt = self.deps.now(),
         attempts = (item.attempts or 0) + 1,
     })
+    -- Anything that raises before the request is out must not leave the item
+    -- `sending` or the slot taken: it ends as a permanent failure (alerted).
+    local flight = { id = id }
+    local ok, err = pcall(self._launch, self, item, flight)
+    if ok then return end
+    warn("Todoist: couldn't prepare the task:", redact(tostring(err), flight.token))
+    if flight.settled then return end -- the attempt had already ended; the error came after
+    flight.settled = true
+    if flight.watchdog then pcall(self.deps.unschedule, flight.watchdog) end
+    self:_finish(id, { ok = false, kind = "permanent", message = M.CANT_PREPARE })
+end
+
+function Queue:_launch(item, flight)
+    local id = item.id
     local token = self.deps.token()
+    flight.token = token
     if type(token) ~= "string" or token == "" then
+        flight.settled = true
         return self:_finish(id, { ok = false, kind = "auth", message = M.NO_KEY })
     end
     local req = td_api.add_request(self.deps.json, token, id,
         td_format.task(item, { with_book = self.deps.with_book() and true or false }))
 
-    local flight = { id = id }
     local function on_done(result)
-        if self.in_flight ~= flight then return end -- late answer to a lost attempt
-        self.deps.unschedule(flight.watchdog)
+        if flight.settled or self.in_flight ~= flight then return end -- late answer to a lost attempt
+        flight.settled = true
+        pcall(self.deps.unschedule, flight.watchdog)
         self:_finish(id, result)
     end
     flight.watchdog = function()
-        if self.in_flight ~= flight then return end
+        if flight.settled or self.in_flight ~= flight then return end
+        flight.settled = true
         self:_finish(id, no_connection())
     end
     self.in_flight = flight
     self.deps.schedule(M.WATCHDOG, flight.watchdog)
-    local ok = pcall(self.deps.run, req, on_done, id)
-    if not ok then on_done(no_connection()) end
+    if not pcall(self.deps.run, req, on_done, id) then on_done(no_connection()) end
+end
+
+--- notify/alert come from the UI: if one raises, the queue still moves on.
+function Queue:_notify(text)
+    local ok, err = pcall(self.deps.notify, text)
+    if not ok then warn("Todoist: notify failed:", tostring(err)) end
 end
 
 function Queue:_finish(id, result)
@@ -189,9 +232,9 @@ function Queue:_finish(id, result)
             status = "sent", task_id = result.task_id or "", sent_at = now,
         })))
         if not saved then
-            self.deps.notify("Sent, but the history couldn't be saved.")
+            self:_notify("Sent, but the history couldn't be saved.")
         elseif was_fresh then
-            self.deps.notify("Sent to Todoist")
+            self:_notify("Sent to Todoist")
         end
     elseif item then
         local kind = result.kind
@@ -208,7 +251,7 @@ function Queue:_finish(id, result)
         self.store:update(id, changes)
         if kind == "auth" then self.auth_blocked = true end
         if kind == "temporary" then
-            if was_fresh then self.deps.notify("Saved, will send later") end
+            if was_fresh then self:_notify("Saved, will send later") end
             self:_maybe_alert()
         else
             self:_maybe_alert(true)

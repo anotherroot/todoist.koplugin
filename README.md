@@ -15,6 +15,7 @@ Status: experimental. Developed for KOReader v2026.03 (Kobo).
 | Select text, then **Send to Todoist** | sends the selection as a quote (no highlight is left behind) |
 | Tap an existing highlight, then **…** → **Send to Todoist** | sends the highlight as a quote, with its note if it has one |
 | Menu → Tools → Todoist → **New idea…** | type an idea and send it (also works in the file browser) |
+| Any gesture → **Todoist: new idea** | the same, from a gesture: Settings → Taps and gestures → Gesture manager → pick a gesture → General |
 | Menu → Tools → Todoist → **Sent items** | the history of everything you sent, newest first |
 | Menu → Tools → Todoist → **Not sent** | only what is still waiting or failed |
 | Menu → Tools → Todoist → **Settings** | API key, **Test connection**, options |

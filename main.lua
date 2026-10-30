@@ -4,6 +4,7 @@ Todoist: send quotes and ideas to your Todoist Inbox.
 @module koplugin.Todoist
 --]]--
 local DataStorage = require("datastorage")
+local Dispatcher = require("dispatcher")
 local NetworkMgr = require("ui/network/manager")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -300,7 +301,17 @@ end
 
 ---------------------------------------------------------------- plugin
 
+-- Actions for KOReader's gesture manager (Settings → Taps and gestures).
+function Todoist:onDispatcherRegisterActions()
+    Dispatcher:registerAction("todoist_new_idea", {
+        category = "none", event = "TodoistNewIdea", title = _("Todoist: new idea"), general = true,
+    })
+end
+
+Todoist.onTodoistNewIdea = guarded(function(self) self:newIdea() end)
+
 function Todoist:init()
+    self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
     if self.ui.highlight then
         self:addHighlightButton()

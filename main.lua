@@ -259,7 +259,9 @@ end
 local function test_connection()
     local token = current_token()
     if not token then return td_ui.info(td_queue.NO_KEY) end
-    NetworkMgr:runWhenOnline(guarded(function()
+    -- runWhenConnected: runWhenOnline would do a DNS lookup on the UI thread;
+    -- the request itself runs in a child process.
+    NetworkMgr:runWhenConnected(guarded(function()
         local json = require("json")
         local td_api = require("td_api")
         local td_request = require("td_request")
@@ -440,6 +442,7 @@ Todoist.onReaderReady = guarded(function(self)
     td_ui.apply_pending_jump(ui)
     UIManager:nextTick(guarded(function()
         local q = start()
+        q:kick() -- a missed retry timer must not leave items stuck
         local info = q:pending_alert()
         if info then
             show_alert(info, ui)

@@ -24,10 +24,26 @@ local function exists(path)
     return f ~= nil
 end
 
+local function write(p, s)
+    local f = assert(io.open(p, "wb"))
+    f:write(s)
+    f:close()
+end
+
 describe("td_history", function()
     local dir, path, clock
     local function now() return clock end
     local function open() return history.open(path, json, now) end
+
+    local function bad_files()
+        local out = {}
+        local p = io.popen("ls -1 '" .. dir .. "'")
+        for line in p:lines() do
+            if line:find("^todoist_history%.json%.bad") then out[#out + 1] = line end
+        end
+        p:close()
+        return out
+    end
 
     before_each(function()
         dir = tmpdir()
@@ -175,25 +191,103 @@ describe("td_history", function()
         assert.is_true(exists(path))
     end)
 
-    it("a corrupt file gives an empty history and is moved to .bad", function()
-        local f = io.open(path, "wb")
-        f:write('{"items": [')
-        f:close()
+    it("a corrupt file with no backup gives an empty history, set aside with a timestamp", function()
+        write(path, '{"items": [')
         local s = open()
         assert.same({}, s:list())
-        assert.is_true(exists(path .. ".bad"))
+        local bad = s.recovered_from.bad
+        assert.is_truthy(bad:find(path .. ".bad-", 1, true) == 1, bad)
+        assert.is_truthy(bad:match("%.bad%-%d%d%d%d%d%d%d%d%-%d%d%d%d%d%d$"), bad)
+        assert.is_false(s.recovered_from.used_old)
         assert.is_false(exists(path))
-        assert.equal('{"items": [', slurp(path .. ".bad"))
+        assert.equal('{"items": [', slurp(bad))
         s:add({ kind = "idea", text = "after" })
-        assert.equal(1, #open():list())
+        local again = open()
+        assert.equal(1, #again:list())
+        assert.is_nil(again.recovered_from)
     end)
 
     it("valid JSON of the wrong shape counts as corrupt too", function()
-        local f = io.open(path, "wb")
-        f:write('{"version":1,"items":"oops"}')
-        f:close()
-        assert.same({}, open():list())
-        assert.is_true(exists(path .. ".bad"))
+        write(path, '{"version":1,"items":"oops"}')
+        local s = open()
+        assert.same({}, s:list())
+        assert.is_true(exists(s.recovered_from.bad))
+    end)
+
+    it("each save keeps the previous file as .old", function()
+        local s = open()
+        s:add({ kind = "idea", text = "a" })
+        s:add({ kind = "idea", text = "b" })
+        assert.equal(2, #json.decode(slurp(path)).items)
+        assert.equal(1, #json.decode(slurp(path .. ".old")).items)
+    end)
+
+    it("an empty file (power cut) is restored from .old", function()
+        local s = open()
+        local a = s:add({ kind = "idea", text = "a" })
+        local b = s:add({ kind = "idea", text = "b" })
+        s:update(b.id, { status = "sent" })
+        write(path, "") -- the last save never reached the card
+        local back = open()
+        assert.equal("a", back:get(a.id).text)
+        assert.equal("b", back:get(b.id).text)
+        assert.is_true(back.recovered_from.used_old)
+        assert.equal("", slurp(back.recovered_from.bad))
+        assert.is_true(exists(path)) -- the restored items are saved again at once
+        assert.equal(2, #json.decode(slurp(path)).items)
+        assert.is_nil(open().recovered_from)
+    end)
+
+    it("a missing file next to a good .old (cut between the renames) is restored quietly", function()
+        local s = open()
+        local a = s:add({ kind = "idea", text = "a" })
+        s:add({ kind = "idea", text = "b" })
+        os.rename(path, path .. ".old")
+        local back = open()
+        assert.equal(2, #back:list())
+        assert.is_truthy(back:get(a.id))
+        assert.is_nil(back.recovered_from)
+    end)
+
+    it("both files unreadable: starts empty and says so", function()
+        write(path, "")
+        write(path .. ".old", "{nope")
+        local s = open()
+        assert.same({}, s:list())
+        assert.is_false(s.recovered_from.used_old)
+        assert.is_true(exists(s.recovered_from.bad))
+    end)
+
+    it("two corruptions keep two .bad files", function()
+        write(path, "first")
+        local one = open().recovered_from.bad
+        write(path, "second")
+        local two = open().recovered_from.bad -- same clock second
+        assert.not_equal(one, two)
+        assert.equal("first", slurp(one))
+        assert.equal("second", slurp(two))
+        assert.equal(2, #bad_files())
+    end)
+
+    it("calls the fsync hooks on the file and the folder", function()
+        local files, dirs = {}, {}
+        local s = history.open(path, json, now, {
+            fsync_file = function(f) files[#files + 1] = io.type(f) end,
+            fsync_dir = function(p) dirs[#dirs + 1] = p end,
+        })
+        s:add({ kind = "idea", text = "a" })
+        assert.same({ "file" }, files) -- still open when synced
+        assert.same({ path }, dirs)
+    end)
+
+    it("an fsync hook that raises doesn't stop the save", function()
+        local s = history.open(path, json, now, {
+            fsync_file = function() error("no fsync") end,
+            fsync_dir = function() error("no fsync") end,
+        })
+        local _, ok = s:add({ kind = "idea", text = "a" })
+        assert.is_true(ok)
+        assert.equal(1, #open():list())
     end)
     it("open recovers a sending item left by a crash, and persists it", function()
         local f = io.open(path, "wb")

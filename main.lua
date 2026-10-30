@@ -51,9 +51,11 @@ local function with_book()
     return settings().ideas_with_book == true
 end
 
+--- Connected to Wi-Fi. Never NetworkMgr:isOnline(): that is a DNS lookup on the
+-- UI thread, which freezes KOReader on a Wi-Fi with dead DNS. A DNS failure
+-- shows up in the request's child process instead, as a temporary error.
 local function online()
-    -- isConnected first: it's cheap, isOnline asks DNS.
-    return NetworkMgr:isConnected() and NetworkMgr:isOnline() and true or false
+    return NetworkMgr:isConnected() and true or false
 end
 
 local function reader()
@@ -95,7 +97,15 @@ local show_alert -- defined below (needs the history and the key dialog)
 local function get_queue()
     if queue then return queue end
     local json = require("json")
-    store = td_history.open(DataStorage:getSettingsDir() .. "/todoist_history.json", json)
+    local ffiutil = require("ffi/util")
+    store = td_history.open(DataStorage:getSettingsDir() .. "/todoist_history.json", json, nil, {
+        fsync_file = ffiutil.fsyncOpenedFile,
+        fsync_dir = ffiutil.fsyncDirectory,
+    })
+    if store.recovered_from then
+        local text = td_ui.recovered_text(store.recovered_from)
+        UIManager:nextTick(guarded(function() td_ui.info(text) end))
+    end
     queue = td_queue.new{
         store = store,
         json = json,
@@ -115,18 +125,18 @@ local function get_queue()
 end
 
 --- Only a hash of the key is kept here (the key itself never twice). When the
--- key changed since it was last seen (file copied over USB, or Settings),
--- items that failed on the old key go back to waiting. `force`: tell the queue anyway.
-local function check_key(force)
+-- key in use changed since it was last seen (file copied over USB, or
+-- Settings), items that failed on the old key go back to waiting. The same key
+-- again (e.g. a Settings key saved while the file's key wins) changes nothing.
+local function check_key()
     local q = get_queue()
     local hash = require("ffi/sha2").sha256(current_token() or "")
     local s = settings()
     if s.token_hash ~= hash then
         s.token_hash = hash
         save_settings(s)
-        force = true
+        q:key_changed()
     end
-    if force then q:key_changed() end
 end
 
 --- The queue, started on first use: key check, then send whatever is waiting.
@@ -140,10 +150,20 @@ local function start()
     return q
 end
 
-local function kick()
+--- Not connected: ask for Wi-Fi the way KOReader is set to ("Action when Wi-Fi
+-- is off"), then submit. runWhenConnected, not runWhenOnline: the latter
+-- starts with a DNS lookup on the UI thread.
+local function ask_for_wifi(id)
+    if online() then return end
+    NetworkMgr:runWhenConnected(guarded(function() get_queue():submit(id) end))
+end
+
+--- "Send again" from the history: like Send, it asks for Wi-Fi when offline.
+local function send_again(id)
     local q = start()
     check_key()
-    q:kick()
+    local submitted = q:resend(id)
+    if submitted then ask_for_wifi(submitted) end
 end
 
 --- Saves a new item, then sends it (asking for Wi-Fi the way KOReader is set to).
@@ -161,17 +181,16 @@ local function send(fields)
     local id = item.id
     -- Saved before Wi-Fi is asked for, so cancelling the prompt loses nothing.
     -- Offline, submit says "Saved, will send when Wi-Fi is on".
-    if online() then return q:submit(id) end
     q:submit(id)
-    NetworkMgr:runWhenOnline(guarded(function() get_queue():submit(id) end))
+    ask_for_wifi(id)
 end
 
 ---------------------------------------------------------------- screens
 
 --- `ui`: the open reader (for "Go to"), or nil in the file browser.
 local function open_history(ui, filter)
-    local q = start() -- first, so `store` exists
-    td_ui.history(store, q, ui, filter)
+    start() -- first, so `store` exists
+    td_ui.history(store, send_again, ui, filter)
 end
 
 local function edit_key(touchmenu)
@@ -181,32 +200,50 @@ local function edit_key(touchmenu)
     if source == "file" then
         description = description .. "\n\n" .. _("The key in todoist_token.txt wins over one set here.")
     end
+    local function set_key(key)
+        local s = settings()
+        s.token = key
+        save_settings(s)
+        check_key() -- requeues key-failed items only if the key in use changed
+        if touchmenu then touchmenu:updateItems() end
+    end
     local dialog
+    local row = {
+        {
+            text = _("Cancel"),
+            id = "close",
+            callback = guarded(function() UIManager:close(dialog) end),
+        },
+    }
+    if td_ui.token_from(nil, settings().token) then
+        row[#row + 1] = {
+            text = _("Remove key"),
+            callback = guarded(function()
+                UIManager:close(dialog)
+                local ConfirmBox = require("ui/widget/confirmbox")
+                UIManager:show(ConfirmBox:new{
+                    text = _("Remove the API key set here?"),
+                    ok_text = _("Remove"),
+                    ok_callback = guarded(function() set_key(nil) end),
+                })
+            end),
+        }
+    end
+    row[#row + 1] = {
+        text = _("Save"),
+        is_enter_default = true,
+        callback = guarded(function()
+            local typed = td_ui.token_from(nil, dialog:getInputText())
+            UIManager:close(dialog)
+            if typed then set_key(typed) end -- empty: nothing changes
+        end),
+    }
     dialog = InputDialog:new{
         title = _("Todoist API key"),
         input = "", -- never put the key on screen
-        input_hint = _("Paste or type the key (empty: remove)"),
+        input_hint = _("Paste or type the key"),
         description = description,
-        buttons = { {
-            {
-                text = _("Cancel"),
-                id = "close",
-                callback = guarded(function() UIManager:close(dialog) end),
-            },
-            {
-                text = _("Save"),
-                is_enter_default = true,
-                callback = guarded(function()
-                    local typed = td_ui.token_from(nil, dialog:getInputText())
-                    UIManager:close(dialog)
-                    local s = settings()
-                    s.token = typed
-                    save_settings(s)
-                    check_key(true)
-                    if touchmenu then touchmenu:updateItems() end
-                end),
-            },
-        } },
+        buttons = { row },
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
@@ -382,7 +419,9 @@ end
 
 -- Event handlers: guarded, and they never return true (others need these events too).
 Todoist.onNetworkConnected = guarded(function()
-    kick()
+    local q = start()
+    check_key()
+    q:connected() -- temporary failures are retried now, not after their backoff
 end)
 
 Todoist.onReaderReady = guarded(function(self)

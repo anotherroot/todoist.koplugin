@@ -114,4 +114,18 @@ describe("td_ui text helpers", function()
             assert.equal("Todoist: 2 items not sent.", td_ui.alert_text({ count = 2 }))
         end)
     end)
+
+    describe("recovered_text", function()
+        local bad = "/mnt/onboard/.adds/koreader/settings/todoist_history.json.bad-20261030-091500"
+        it("names the .bad file and says the backup copy was used", function()
+            assert.equal("Todoist: the history file was damaged and was set aside as\n" .. bad
+                .. "\n\nRestored from the backup copy.",
+                td_ui.recovered_text({ bad = bad, used_old = true }))
+        end)
+        it("says the history started empty when there was no backup", function()
+            assert.equal("Todoist: the history file was damaged and was set aside as\n" .. bad
+                .. "\n\nThe history started empty.",
+                td_ui.recovered_text({ bad = bad, used_old = false }))
+        end)
+    end)
 end)

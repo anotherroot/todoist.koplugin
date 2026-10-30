@@ -1,6 +1,11 @@
--- On-device history of everything sent, with a status per item. Saved
--- atomically (write .tmp, rename over) so a power cut never leaves half a file;
--- a file that cannot be read is moved aside to .bad and history starts empty.
+-- On-device history of everything sent, with a status per item.
+--
+-- Saving: write .tmp and fsync it, keep the current file as .old, rename .tmp
+-- over, fsync the folder. A power cut then leaves the new file or the previous
+-- one (.old) readable.
+-- Loading: a file that can't be read is moved aside to .bad-<date-time> (never
+-- over an older .bad) and .old is used instead; `store.recovered_from` =
+-- { bad = path, used_old = bool } tells the owner. No usable .old: empty.
 local M = {}
 
 local STATUSES = { waiting = true, sending = true, sent = true, failed = true }
@@ -45,6 +50,18 @@ function Store:_save()
     return ok, self.last_save_error
 end
 
+local function exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() end
+    return f ~= nil
+end
+
+-- The fsync hooks are optional (KOReader's ffi/util ones on the device) and
+-- never stop a save: without them it's as safe as the filesystem alone.
+local function sync(fn, arg)
+    if fn then pcall(fn, arg) end
+end
+
 function Store:_write()
     local ok, data = pcall(self.json.encode, { version = 1, items = self.items })
     if not ok or type(data) ~= "string" then return false, tostring(data) end
@@ -53,16 +70,22 @@ function Store:_write()
     if not f then return false, err end
     local wrote, werr = f:write(data)
     if wrote then wrote, werr = f:flush() end
+    if wrote then sync(self.fsync_file, f) end
     f:close()
     if not wrote then
         os.remove(tmp)
         return false, werr
     end
+    -- The file being replaced was written and synced by an earlier save: keep it
+    -- (unless it is a damaged one that couldn't be moved aside).
+    if not self.main_damaged and exists(self.path) then os.rename(self.path, self.path .. ".old") end
     local renamed, rerr = os.rename(tmp, self.path)
     if not renamed then
         os.remove(tmp)
         return false, rerr
     end
+    sync(self.fsync_dir, self.path)
+    self.main_damaged = nil
     return true
 end
 
@@ -163,9 +186,10 @@ function Store:clear_sent()
     return self:_save()
 end
 
-local function load_items(path, json)
+--- The items in a history file; nil, "missing" | "unreadable" otherwise.
+local function read_items(path, json)
     local f = io.open(path, "rb")
-    if not f then return {} end
+    if not f then return nil, "missing" end
     local raw = f:read("*a")
     f:close()
     local ok, data = pcall(json.decode, raw or "")
@@ -176,18 +200,44 @@ local function load_items(path, json)
         end
         return items
     end
-    os.remove(path .. ".bad")
-    os.rename(path, path .. ".bad")
-    return {}
+    return nil, "unreadable"
 end
 
-function M.open(path, json, now_fn)
+--- Moves an unreadable file aside to a new .bad-<date-time>[-n]; returns that path.
+local function set_aside(path, now)
+    local base = path .. ".bad-" .. os.date("%Y%m%d-%H%M%S", now)
+    local bad, n = base, 1
+    while exists(bad) do
+        n = n + 1
+        bad = base .. "-" .. n
+    end
+    if not os.rename(path, bad) then return path, true end -- couldn't move: still there
+    return bad
+end
+
+--- `opts` (optional): fsync_file(file), fsync_dir(path), e.g. KOReader's
+-- ffiutil.fsyncOpenedFile and ffiutil.fsyncDirectory.
+function M.open(path, json, now_fn, opts)
+    opts = opts or {}
     local store = setmetatable({
         path = path,
         json = json,
         now = now_fn or os.time,
-        items = load_items(path, json),
+        fsync_file = opts.fsync_file,
+        fsync_dir = opts.fsync_dir,
     }, Store)
+    local items, why = read_items(path, json)
+    local bad
+    if why == "unreadable" then bad, store.main_damaged = set_aside(path, store.now()) end
+    local used_old = false
+    if not items then
+        -- Damaged, or missing (a cut between the two renames of a save, or a first start).
+        items = read_items(path .. ".old", json)
+        used_old = items ~= nil
+    end
+    store.items = items or {}
+    if bad then store.recovered_from = { bad = bad, used_old = used_old } end
+    if used_old then store:_save() end -- the main file again; .old stays as it is
     store:recover()
     return store
 end

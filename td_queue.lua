@@ -6,9 +6,10 @@ the same uuid, so Todoist never adds it twice.
 
     local queue = td_queue.new(deps)
     queue:submit(id)      -- the owner just saved it
-    queue:kick()          -- on start, on NetworkConnected, by its own timer
+    queue:kick()          -- on start, by its own timer
+    queue:connected()     -- on NetworkConnected: temporary failures retry at once
 
-`deps`: store, json, now(), token(), with_book(), online(),
+`deps`: store, json, now(), token(), with_book(), online() (must be cheap: no DNS),
 run(req, on_done, uuid), schedule(seconds, fn), unschedule(fn),
 alert({ count, message, kind }), notify(text).
 Everything KOReader-specific comes in through `deps`, so the queue runs in tests.
@@ -146,25 +147,45 @@ function Queue:submit(item_id)
     self:kick()
 end
 
---- Sends the oldest due item, if none is out yet; otherwise (re)arms the timer
--- for the earliest retry. Safe to call any number of times.
+--- Sends the oldest due item, if none is out yet and there is a connection;
+-- otherwise (re)arms the timer for the earliest retry. The connection is asked
+-- about only when something is due. Safe to call any number of times.
 function Queue:kick()
     if self.in_flight or self.auth_blocked then return end
     self.deps.unschedule(self.tick)
-    if not self.deps.online() then return end
     local now = self.deps.now()
-    local earliest
+    local due, earliest
     for _, item in ipairs(self:_oldest_first()) do
         if item.status == "waiting" then
-            return self:_start(item)
+            due = item
+            break
         end
         if item.status == "failed" and not blocked(item) then
             local at = item.next_try or 0
-            if at <= now then return self:_start(item) end
+            if at <= now then
+                due = item
+                break
+            end
             if not earliest or at < earliest then earliest = at end
         end
     end
+    if due then
+        -- Offline: no timer; Wi-Fi connecting kicks again (connected()).
+        if self.deps.online() then self:_start(due) end
+        return
+    end
     if earliest then self.deps.schedule(earliest - now, self.tick) end
+end
+
+--- Wi-Fi just connected: items that failed for a temporary reason are due at
+-- once (their backoff no longer applies), then the queue is kicked.
+function Queue:connected()
+    for _, item in ipairs(self:_oldest_first()) do
+        if item.status == "failed" and not blocked(item) and item.next_try ~= nil then
+            self.store:update(item.id, { next_try = NONE })
+        end
+    end
+    self:kick()
 end
 
 function Queue:_start(item)
@@ -294,7 +315,8 @@ end
 
 --- The real `deps.run`: the request goes out in a child process (td_request),
 -- and the answer is sorted by td_api.parse_add. Anything without an HTTP code
--- (timeout, dead child, no process) is a temporary "No connection.".
+-- (timeout, DNS failure, dead child, no process) is a temporary "No connection.";
+-- why goes to the log as one fixed word (td_api.failure_reason), never raw text.
 -- Needs KOReader, so td_request is required here, not at load.
 function M.real_run(json)
     return function(req, on_done, uuid)
@@ -308,6 +330,10 @@ function M.real_run(json)
         end
         local handle = td_request.start(function()
             local code, body = td_api.send(req, 15)
+            if code == nil then
+                warn("Todoist: send failed:", td_api.failure_reason(body))
+                return {}
+            end
             return { code = code, body = body }
         end, done, { timeout = 15 })
         if not handle then done(nil) end

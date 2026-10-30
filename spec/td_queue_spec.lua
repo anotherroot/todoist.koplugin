@@ -409,15 +409,16 @@ describe("td_queue", function()
         assert.equal(item.id, store:get(item.id).id)
     end)
 
-    it("no retry timer while offline; kick on reconnect sends", function()
+    it("offline: the retry timer sends nothing and isn't rearmed; kick on reconnect sends", function()
         local item = add()
         queue:submit(item.id)
         answer_temp(1)
         env.online = false
         queue:kick()
-        assert.equal(0, #env.timers)
         advance(3600)
         assert.equal(1, #env.requests)
+        assert.equal(0, #env.timers)
+        assert.equal("failed", store:get(item.id).status)
         env.online = true
         queue:kick()
         assert.equal(2, #env.requests)
@@ -555,5 +556,92 @@ describe("td_queue", function()
         assert.equal(b.id, body_uuid(env.requests[2].req))
         answer_ok(2)
         assert.equal("sent", store:get(b.id).status)
+    end)
+
+    it("kick asks about the connection only when something is due", function()
+        local calls = 0
+        local deps = deps_for(store)
+        deps.online = function() calls = calls + 1; return env.online end
+        local q = td_queue.new(deps)
+        q:kick() -- nothing in the history
+        assert.equal(0, calls)
+        local item = add()
+        q:submit(item.id) -- submit checks once, kick once more for the due item
+        answer_temp(1)
+        calls = 0
+        q:kick() -- the failed item isn't due yet: no check, the timer is rearmed
+        assert.equal(0, calls)
+        assert.equal(1, #env.timers)
+        advance(60) -- due now: checked
+        assert.equal(1, calls)
+        assert.equal(2, #env.requests)
+    end)
+
+    it("connected() retries temporary failures at once, not auth or permanent ones", function()
+        local t = add("temporary")
+        env.clock = 1001
+        local p = add("permanent")
+        env.clock = 1002
+        local a = add("auth")
+        store:update(t.id, { status = "failed", error_kind = "temporary", last_error = "No connection.", next_try = 5000, attempts = 2 })
+        store:update(p.id, { status = "failed", error_kind = "permanent", last_error = "Refused." })
+        store:update(a.id, { status = "failed", error_kind = "auth", last_error = "Rejected." })
+        queue:kick()
+        assert.equal(0, #env.requests) -- backoff still running
+        queue:connected()
+        assert.equal(1, #env.requests)
+        assert.equal(t.id, body_uuid(env.requests[1].req))
+        assert.is_nil(open_store():get(t.id).next_try)
+        answer_ok(1)
+        assert.equal("sent", store:get(t.id).status)
+        assert.equal(1, #env.requests) -- the blocked ones wait for the owner
+        assert.equal("failed", store:get(p.id).status)
+        assert.equal("failed", store:get(a.id).status)
+    end)
+
+    it("connected() while offline changes nothing it can't send", function()
+        local t = add()
+        store:update(t.id, { status = "failed", error_kind = "temporary", next_try = 5000, attempts = 1 })
+        env.online = false
+        queue:connected()
+        assert.equal(0, #env.requests)
+        assert.equal(0, #env.timers)
+        env.online = true
+        queue:kick()
+        assert.equal(1, #env.requests) -- next_try was cleared: due at once
+    end)
+
+    describe("real_run", function()
+        local saved_request, saved_logger, saved_send, logged
+        before_each(function()
+            saved_request, saved_logger, saved_send = package.loaded.td_request, package.loaded.logger, api.send
+            logged = {}
+            package.loaded.td_request = {
+                start = function(task, done) done(task()); return {} end,
+            }
+            package.loaded.logger = { warn = function(...) logged[#logged + 1] = table.concat({ ... }, " ") end }
+        end)
+        after_each(function()
+            package.loaded.td_request, package.loaded.logger, api.send = saved_request, saved_logger, saved_send
+        end)
+
+        local function run_with(code, body)
+            api.send = function() return code, body end
+            local result
+            td_queue.real_run(json)({ headers = {} }, function(r) result = r end, "u-1")
+            return result
+        end
+
+        it("logs a short reason when the request fails, never the raw error", function()
+            local r = run_with(nil, "Bearer secrettoken1234: host not found")
+            assert.same({ ok = false, kind = "temporary", message = "No connection." }, r)
+            assert.same({ "Todoist: send failed: host not found" }, logged)
+        end)
+
+        it("logs nothing when Todoist answered", function()
+            local r = run_with(200, ok_body("u-1", "T9"))
+            assert.is_true(r.ok)
+            assert.same({}, logged)
+        end)
     end)
 end)

@@ -125,6 +125,29 @@ function M.parse_user(json, code, body)
     return { ok = true, name = name }
 end
 
+-- Patterns (on the lowercased error) -> the only words that reach the log.
+local REASONS = {
+    { "timeout", "timeout" }, { "timed out", "timeout" },
+    { "host not found", "host not found" }, { "name resolution", "host not found" },
+    { "name or service not known", "host not found" }, { "no address associated", "host not found" },
+    { "refused", "connection refused" },
+    { "ssl", "TLS" }, { "tls", "TLS" }, { "certificate", "TLS" }, { "handshake", "TLS" },
+    { "wrong version number", "TLS" },
+    { "closed", "closed" },
+}
+
+--- A short, fixed reason for a failed `send` (its second return value), safe
+-- to log: timeout / host not found / connection refused / TLS / closed / other.
+-- The raw text never passes through: it could contain request data.
+function M.failure_reason(err)
+    if type(err) ~= "string" then return "other" end
+    local s = err:lower()
+    for _, r in ipairs(REASONS) do
+        if s:find(r[1], 1, true) then return r[2] end
+    end
+    return "other"
+end
+
 --- One HTTP request. Child process only (blocks); the requires are lazy so the
 -- module loads in tests.
 -- @tparam table req { url, method, headers, body }

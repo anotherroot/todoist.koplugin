@@ -46,7 +46,8 @@ Give it to the plugin in either way:
 If both exist, the file wins; Settings shows which one is in use and only the
 last four characters of the key. Use **Test connection** to check it: it shows
 "Connected as …" or the reason it failed. Changing the key retries items that
-were stopped by a bad key.
+were stopped by a bad key. Saving an empty field changes nothing; to delete a
+key set there, use **Remove key** (shown only when one is set).
 
 ## What a task looks like
 
@@ -94,10 +95,12 @@ does not create duplicates in Todoist. **Send again** on an item that was
 already sent makes a second copy on purpose.
 
 Temporary problems (no network, a timeout, Todoist being busy) are retried
-automatically when Wi-Fi connects and then every few minutes, up to every 30
-minutes. The plugin never turns Wi-Fi on by itself in the background. Problems
-that retrying cannot fix (for example a wrong or revoked key) stop that item
-until you fix the key or tap **Send again**.
+automatically: right away when Wi-Fi connects, and otherwise every few
+minutes, up to every 30 minutes. The plugin never turns Wi-Fi on in the
+background. Pressing **Send** or **Send again** while offline follows
+KOReader's "Action when Wi-Fi is off" setting, so it may ask to turn Wi-Fi on.
+Problems that retrying cannot fix (for example a wrong or revoked key) stop
+that item until you fix the key or tap **Send again**.
 
 When items are not getting through, a popup you have to dismiss says how many
 are not sent and why, with **Show items** (and **Settings** for key problems).
@@ -107,13 +110,23 @@ it is not repeated for every retry.
 Settings → **Clear sent items…** removes the sent items from the history
 (after a confirmation); items not sent yet are kept.
 
+The history is the file `todoist_history.json` in KOReader's `settings/`
+folder, with the previous version kept next to it as `todoist_history.json.old`.
+If the file is ever damaged (say, by a power cut), it is set aside as
+`todoist_history.json.bad-<date-time>`, the previous version is used, and a
+message tells you so.
+
 ## Privacy
 
 Your API key stays on the device (in `todoist_token.txt` or KOReader's
-settings) and is only sent to Todoist, to log you in. It is never written to
-logs or to the history. The only other thing that leaves the device is the text
-of each task described above, sent to `api.todoist.com`. There is no other
-server and no tracking.
+settings) and is only sent to Todoist: it goes with every request, as the
+authorization header. It is never written to logs or to the history. The only
+other thing that leaves the device is the text of each task described above,
+sent to `api.todoist.com`. There is no other server and no tracking.
+
+Like other KOReader network plugins, the connection uses KOReader's default
+TLS settings, which don't verify Todoist's certificate, so avoid untrusted
+Wi-Fi if that matters to you.
 
 ## Development
 

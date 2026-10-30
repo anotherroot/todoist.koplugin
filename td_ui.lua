@@ -100,6 +100,14 @@ function M.alert_text(info)
     return head .. "\n\n" .. tostring(info.message)
 end
 
+--- The notice when the history file had to be set aside (td_history's
+-- store.recovered_from = { bad, used_old }).
+function M.recovered_text(recovered)
+    return _("Todoist: the history file was damaged and was set aside as") .. "\n"
+        .. tostring(recovered.bad) .. "\n\n"
+        .. (recovered.used_old and _("Restored from the backup copy.") or _("The history started empty."))
+end
+
 -------------------------------------------------------------------- widgets
 
 local function show(widget)
@@ -196,8 +204,9 @@ local function can_go_to(item)
 end
 
 --- The popup for one item, built from its current state.
--- on_change() runs after "Send again"; leave() closes the history (before "Go to").
-function M.item_popup(store, queue, ui, id, on_change, leave)
+-- send_again(id) does "Send again" (asking for Wi-Fi like Send does);
+-- on_change() runs after it; leave() closes the history (before "Go to").
+function M.item_popup(store, send_again, ui, id, on_change, leave)
     local item = store:get(id)
     if not item then return end
     local TextViewer = require("ui/widget/textviewer")
@@ -207,7 +216,7 @@ function M.item_popup(store, queue, ui, id, on_change, leave)
             text = _("Send again"),
             callback = guarded(function()
                 close(viewer)
-                queue:resend(id)
+                send_again(id)
                 if on_change then on_change() end
             end),
         },
@@ -232,7 +241,8 @@ function M.item_popup(store, queue, ui, id, on_change, leave)
 end
 
 --- The history list, newest first. filter "unsent" = waiting + sending + failed.
-function M.history(store, queue, ui, filter)
+-- send_again(id): see item_popup.
+function M.history(store, send_again, ui, filter)
     local Menu = require("ui/widget/menu")
     local menu
     local refresh
@@ -245,7 +255,7 @@ function M.history(store, queue, ui, filter)
             local row = M.row(item)
             local id = item.id
             row.callback = guarded(function()
-                M.item_popup(store, queue, ui, id, refresh, leave)
+                M.item_popup(store, send_again, ui, id, refresh, leave)
             end)
             out[#out + 1] = row
         end

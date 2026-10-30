@@ -106,11 +106,9 @@ local function get_queue()
         run = td_queue.real_run(json),
         schedule = schedule,
         unschedule = unschedule,
-        -- With no book open the alert waits: pending_alert() shows it at the next book open.
-        alert = guarded(function(info)
-            local ui = reader()
-            if ui then show_alert(info, ui) end
-        end),
+        -- Shown in a book or the file browser alike (never silently stuck);
+        -- the next book open shows it again while anything is still failed.
+        alert = guarded(function(info) show_alert(info, reader()) end),
         notify = guarded(td_ui.notify),
     }
     return queue
@@ -341,6 +339,10 @@ function Todoist:menuItems()
         {
             text = _("Sent items"),
             callback = guarded(function() open_history(reader()) end),
+        },
+        {
+            text = _("Not sent"),
+            callback = guarded(function() open_history(reader(), "unsent") end),
         },
         {
             text = _("Settings"),

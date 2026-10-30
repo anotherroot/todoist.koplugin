@@ -122,15 +122,21 @@ function M.notify(text)
     Notification:notify(text, Notification.SOURCE_ALWAYS_SHOW)
 end
 
---- The alert: a dialog that stays until tapped away.
--- open_settings is only offered for key errors.
+-- The alert on screen, if any: a second one never stacks on top of it.
+local open_alert
+
+--- The alert: a dialog that stays until tapped away (in a book or the file
+-- browser). open_settings is only offered for key errors.
+-- Returns false when one is already up.
 function M.alert(info_, open_history, open_settings)
+    local UIManager = require("ui/uimanager")
+    if open_alert and UIManager:isWidgetShown(open_alert) then return false end
     local ConfirmBox = require("ui/widget/confirmbox")
     local other
     if info_.kind == "auth" and open_settings then
         other = { { { text = _("Settings"), callback = guarded(open_settings) } } }
     end
-    show(ConfirmBox:new{
+    open_alert = ConfirmBox:new{
         text = M.alert_text(info_),
         icon = "notice-warning",
         ok_text = _("Show items"),
@@ -138,7 +144,9 @@ function M.alert(info_, open_history, open_settings)
         cancel_text = _("Close"),
         other_buttons = other,
         flush_events_on_show = true, -- it can pop up mid-tap; don't let that tap dismiss it
-    })
+    }
+    show(open_alert)
+    return true
 end
 
 -- "Go to" a book that isn't open yet: kept here (module level) until that

@@ -8,6 +8,9 @@ local COPY_FIELDS = { "kind", "text", "book", "author", "file", "page", "pos", "
 
 local seeded = false
 
+--- Sentinel for update(): a field set to NONE is removed.
+M.NONE = setmetatable({}, { __tostring = function() return "NONE" end })
+
 -- Canonical UUID v4 (lowercase), bytes from /dev/urandom, math.random fallback.
 local function uuid4()
     local bytes
@@ -37,6 +40,12 @@ local Store = {}
 Store.__index = Store
 
 function Store:_save()
+    local ok, err = self:_write()
+    self.last_save_error = (not ok) and tostring(err) or nil
+    return ok, self.last_save_error
+end
+
+function Store:_write()
     local ok, data = pcall(self.json.encode, { version = 1, items = self.items })
     if not ok or type(data) ~= "string" then return false, tostring(data) end
     local tmp = self.path .. ".tmp"
@@ -71,8 +80,8 @@ function Store:add(fields)
     item.status = "waiting"
     item.attempts = 0
     self.items[#self.items + 1] = item
-    self:_save()
-    return item
+    local ok, err = self:_save()
+    return item, ok, err
 end
 
 function Store:get(id)
@@ -98,7 +107,8 @@ function Store:list(filter)
     return out
 end
 
---- Merge changes into an item and save. nil for an unknown id or a bad status.
+--- Merge changes into an item and save (a field set to M.NONE is removed).
+-- Returns item, ok, err; nil for an unknown id or a bad status.
 function Store:update(id, changes)
     local item = self:_find(id)
     if not item then return nil, "unknown id" end
@@ -106,10 +116,12 @@ function Store:update(id, changes)
         return nil, "bad status"
     end
     for k, v in pairs(changes) do
-        if k ~= "id" then item[k] = v end
+        if k ~= "id" then
+            if v == M.NONE then item[k] = nil else item[k] = v end
+        end
     end
-    self:_save()
-    return item
+    local ok, err = self:_save()
+    return item, ok, err
 end
 
 --- After a crash or restart nothing is really in flight: sending -> waiting.
@@ -121,7 +133,8 @@ function Store:recover()
             changed = true
         end
     end
-    if changed then self:_save() end
+    if changed then return self:_save() end
+    return true
 end
 
 function Store:counts()
@@ -147,7 +160,7 @@ function Store:clear_sent()
         if item.status ~= "sent" then kept[#kept + 1] = item end
     end
     self.items = kept
-    self:_save()
+    return self:_save()
 end
 
 local function load_items(path, json)
@@ -175,6 +188,7 @@ function M.open(path, json, now_fn)
         now = now_fn or os.time,
         items = load_items(path, json),
     }, Store)
+    store:recover()
     return store
 end
 
